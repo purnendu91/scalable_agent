@@ -26,6 +26,8 @@ import tensorflow as tf
 
 import deepmind_lab
 
+import cv2
+
 
 nest = tf.contrib.framework.nest
 
@@ -93,12 +95,17 @@ class PyProcessDmLab(object):
     return self._observation()
 
   def step(self, action):
+    # if self.visable:
+    
     reward = self._env.step(action, num_steps=self._num_action_repeats)
     done = np.array(not self._env.is_running())
     if done:
       self._reset()
     observation = self._observation()
     reward = np.array(reward, dtype=np.float32)
+    cv2.namedWindow("agentX", cv2.WINDOW_NORMAL)
+    cv2.imshow("agentX",observation[0])
+    cv2.waitKey(1)
     return reward, done, observation
 
   def close(self):

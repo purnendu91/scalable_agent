@@ -415,7 +415,7 @@ def build_learner(agent, agent_state, env_outputs, agent_outputs):
   return done, infos, num_env_frames_and_train
 
 
-def create_environment(level_name, seed, is_test=False, visable=False):
+def create_environment(level_name, seed, is_test=False):
   """Creates an environment wrapped in a `FlowEnvironment`."""
   if level_name in dmlab30.ALL_LEVELS:
     level_name = 'contributed/dmlab30/' + level_name
@@ -488,7 +488,7 @@ def train(action_set, level_names):
   # Only used to find the actor output structure.
   with tf.Graph().as_default():
     agent = Agent(len(action_set))
-    env = create_environment(level_names[0], seed=1, visable=(i==0))
+    env = create_environment(level_names[0], seed=1)
     structure = build_actor(agent, env, level_names[0], action_set)
     flattened_structure = nest.flatten(structure)
     dtypes = [t.dtype for t in flattened_structure]
@@ -524,7 +524,7 @@ def train(action_set, level_names):
       if is_actor_fn(i):
         level_name = level_names[i % len(level_names)]
         tf.logging.info('Creating actor %d with level %s', i, level_name)
-        env = create_environment(level_name, seed=i + 1, visable=(i==0))
+        env = create_environment(level_name, seed=i + 1)
         actor_output = build_actor(agent, env, level_name, action_set)
         with tf.device(shared_job_device):
           enqueue_ops.append(queue.enqueue(nest.flatten(actor_output)))
@@ -647,17 +647,58 @@ def train(action_set, level_names):
 def test(action_set, level_names):
   """Test."""
 
+  for level_name in level_names:
+    print(level_name)
+
   level_returns = {level_name: [] for level_name in level_names}
-  with tf.Graph().as_default():
+  with tf.Graph().as_default() as graph:
     agent = Agent(len(action_set))
     outputs = {}
     for level_name in level_names:
-      env = create_environment(level_name, seed=1, is_test=True, visable=True)
+      env = create_environment(level_name, seed=1, is_test=True)
       outputs[level_name] = build_actor(agent, env, level_name, action_set)
+
+    # for op in graph.get_operations():
+    #   print(op.name)
+
+
+    #See if remove_training_nodes makes any diff in the count of nodes in the graph
+    tf.logging.info('Number of TF/TRT ops in graph before remove_training_nodes op')
+    tf.logging.info(len([1 for n in graph.as_graph_def().node]))
+
+    graphdef = tf.graph_util.remove_training_nodes(
+        graph.as_graph_def(),
+        protected_nodes=None
+    )
+
+    tf.logging.info('Number of TF/TRT ops in graph after remove_training_nodes op')
+    tf.logging.info(len([1 for n in graphdef.node]))
+
+
+
+
+
 
     with tf.train.SingularMonitoredSession(
         checkpoint_dir=FLAGS.logdir,
         hooks=[py_process.PyProcessHook()]) as session:
+
+      writer = tf.summary.FileWriter(logdir='/tmp/log/im_agent_before', graph=session.graph)
+      writer.flush() 
+
+      tf.logging.info('Works  - after filewriter, before frozen graph')
+
+      frozen_graph = tf.graph_util.convert_variables_to_constants(
+        session,
+        tf.get_default_graph().as_graph_def(),
+        ['concat/(concat)'])
+
+      tf.logging.info('Works  - after frozen, before write_graph_to_file')
+
+      write_graph_to_file("original_graph.pb", frozen_graph, '/tmp/beforetrt_impala')
+
+      tf.logging.info('Works  - after write_graph_to_file, before loop')
+
       for level_name in level_names:
         tf.logging.info('Testing level: %s', level_name)
         while True:
