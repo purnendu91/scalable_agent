@@ -78,7 +78,9 @@ class PyProcessDmLab(object):
         level=level,
         observations=self._observation_spec,
         config=config,
-        level_cache=level_cache,
+        level_cache=level_cache
+        # level_cache=level_cache,
+        # renderer='hardware'
     )
 
   def _reset(self):

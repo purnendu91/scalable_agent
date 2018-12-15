@@ -27,7 +27,6 @@ import sys
 import dmlab30
 import environments
 import numpy as np
-import py_process
 import sonnet as snt
 import tensorflow as tf
 import vtrace
@@ -237,10 +236,32 @@ class Agent(snt.RNNCore):
     return snt.BatchApply(self._head)(tf.stack(core_output_list)), core_state
 
 
-def build_actor(agent, env, level_name, action_set):
+def build_actor(agent, level_name, action_set):
   """Builds the actor loop."""
   # Initial values.
-  initial_env_output, initial_env_state = env.initial()
+  StepOutputInfo = collections.namedtuple('StepOutputInfo',
+                                          'episode_return episode_step')
+  StepOutput = collections.namedtuple('StepOutput',
+                                      'reward info done observation')
+  Observation = collections.namedtuple('observation', 'frame instruction')
+
+  frame = tf.random_uniform([72, 96, 3], name='frame')
+  instruction = tf.constant("foo")
+  initial_reward = tf.constant(0.)
+  initial_info = StepOutputInfo(tf.constant(0.), tf.constant(0))
+  initial_done = tf.constant(True)
+  initial_observation = Observation(frame, instruction)
+
+  initial_output = StepOutput(
+    initial_reward,
+    initial_info,
+    initial_done,
+    initial_observation)
+  with tf.control_dependencies(nest.flatten(initial_output)):
+    initial_flow = tf.constant(0, dtype=tf.int64)
+  initial_state = (initial_flow, initial_info)
+  initial_env_output, initial_env_state = initial_output, initial_state
+
   initial_agent_state = agent.initial_state(1)
   initial_action = tf.zeros([1], dtype=tf.int32)
   dummy_agent_output, _ = agent(
@@ -276,7 +297,28 @@ def build_actor(agent, env, level_name, action_set):
     action = agent_output[0][0]
     raw_action = tf.gather(action_set, action)
 
-    env_output, env_state = env.step(raw_action, env_state)
+    StepOutputInfo = collections.namedtuple('StepOutputInfo',
+                                            'episode_return episode_step')
+    StepOutput = collections.namedtuple('StepOutput',
+                                        'reward info done observation')
+    Observation = collections.namedtuple('observation', 'frame instruction')
+
+    frame = tf.random_uniform([72, 96, 3], name='frame')
+    instruction = tf.constant("foo")
+    initial_reward = tf.constant(0.)
+    initial_info = StepOutputInfo(tf.constant(0.), tf.constant(0))
+    initial_done = tf.constant(True)
+    initial_observation = Observation(frame, instruction)
+
+    initial_output = StepOutput(
+      initial_reward,
+      initial_info,
+      initial_done,
+      initial_observation)
+    with tf.control_dependencies(nest.flatten(initial_output)):
+      initial_flow = tf.constant(0, dtype=tf.int64)
+    initial_state = (initial_flow, initial_info)
+    env_output, env_state = initial_output, initial_state
 
     return env_state, env_output, agent_state, agent_output
 
@@ -427,30 +469,6 @@ def build_learner(agent, agent_state, env_outputs, agent_outputs):
   return done, infos, num_env_frames_and_train
 
 
-def create_environment(level_name, seed, is_test=False):
-  """Creates an environment wrapped in a `FlowEnvironment`."""
-  if level_name in dmlab30.ALL_LEVELS:
-    level_name = 'contributed/dmlab30/' + level_name
-
-  # Note, you may want to use a level cache to speed of compilation of
-  # environment maps. See the documentation for the Python interface of DeepMind
-  # Lab.
-  config = {
-      'width': FLAGS.width,
-      'height': FLAGS.height,
-      'datasetPath': FLAGS.dataset_path,
-      'logLevel': 'WARN',
-  }
-  if is_test:
-    config['allowHoldOutLevels'] = 'true'
-    # Mixer seed for evalution, see
-    # https://github.com/deepmind/lab/blob/master/docs/users/python_api.md
-    config['mixerSeed'] = 0x600D5EED
-  p = py_process.PyProcess(environments.PyProcessDmLab, level_name, config,
-                           FLAGS.num_action_repeats, seed)
-  return environments.FlowEnvironment(p.proxy)
-
-
 @contextlib.contextmanager
 def pin_global_variables(device):
   """Pins global variables to the specified device."""
@@ -484,15 +502,11 @@ def train(action_set, level_names):
     shared_job_device = '/job:learner/task:0'
     is_actor_fn = lambda i: FLAGS.job_name == 'actor' and i == FLAGS.task
     is_learner = FLAGS.job_name == 'learner'
-    actor_ips = FLAGS.actor_hosts.split(',')
-    actor_hosts = [] 
-    for actor_ip in actor_ips:
-      actor_hosts += [actor_ip + ':' + str(i) for i in range(FLAGS.actor_min_port, FLAGS.actor_max_port + 1)]
+    actor_hosts = [FLAGS.actor_hosts + ':' + str(i) for i in range(FLAGS.actor_min_port, FLAGS.actor_max_port + 1)]
     learner_host = FLAGS.learner_host.split(',') 
     # Placing the variable on CPU, makes it cheaper to send it to all the
     # actors. Continual copying the variables from the GPU is slow.
     global_variable_device = shared_job_device + '/cpu'
-    # global_variable_device = shared_job_device + '/gpu'
     filters = [shared_job_device, local_job_device]
     cluster = tf.train.ClusterSpec({
         'actor': actor_hosts,
@@ -507,8 +521,7 @@ def train(action_set, level_names):
   # Only used to find the actor output structure.
   with tf.Graph().as_default():
     agent = Agent(len(action_set))
-    env = create_environment(level_names[0], seed=1)
-    structure = build_actor(agent, env, level_names[0], action_set)
+    structure = build_actor(agent, level_names[0], action_set)
     flattened_structure = nest.flatten(structure)
     dtypes = [t.dtype for t in flattened_structure]
     shapes = [t.shape.as_list() for t in flattened_structure]
@@ -520,7 +533,6 @@ def train(action_set, level_names):
 
     # Create Queue and Agent on the learner.
     with tf.device(shared_job_device):
-    # with tf.device(shared_job_device + '/' + FLAGS.actor_on):
       queue = tf.FIFOQueue(1, dtypes, shapes, shared_name='buffer')
       agent = Agent(len(action_set))
 
@@ -544,10 +556,8 @@ def train(action_set, level_names):
       if is_actor_fn(i):
         level_name = level_names[i % len(level_names)]
         tf.logging.info('Creating actor %d with level %s', i, level_name)
-        env = create_environment(level_name, seed=i + 1)
-        actor_output = build_actor(agent, env, level_name, action_set)
+        actor_output = build_actor(agent, level_name, action_set)
         with tf.device(shared_job_device):
-        # with tf.device(shared_job_device + '/' + FLAGS.actor_on):
           enqueue_ops.append(queue.enqueue(nest.flatten(actor_output)))
 
     # If running in a single machine setup, run actors with QueueRunners
@@ -605,8 +615,7 @@ def train(action_set, level_names):
         save_checkpoint_secs=600,
         save_summaries_secs=30,
         log_step_count_steps=50000,
-        config=config,
-        hooks=[py_process.PyProcessHook()]) as session:
+        config=config) as session:
 
       if is_learner:
         # Logging.
@@ -629,9 +638,6 @@ def train(action_set, level_names):
               infos_v.episode_return[done_v],
               infos_v.episode_step[done_v]):
             episode_frames = episode_step * FLAGS.num_action_repeats
-
-            tf.logging.info('Level: %s Episode return: %f',
-                            level_name, episode_return)
 
             summary = tf.summary.Summary()
             summary.value.add(tag=level_name + '/episode_return',
