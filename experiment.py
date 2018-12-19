@@ -497,6 +497,7 @@ def train(action_set, level_names):
     cluster = tf.train.ClusterSpec({
         'actor': actor_hosts,
         'learner': learner_host
+
     })
     config = tf.ConfigProto(allow_soft_placement=True, device_filters=filters)
     if not is_learner:
